@@ -83,7 +83,8 @@ def _tech_to_dict(tech) -> Dict[str, Any]:
         "trend": getattr(tech, "trend", ""),
         "ma_signal": getattr(tech, "ma_signal", ""),
         "macd_signal": getattr(tech, "macd_signal", ""),
-        "rsi": getattr(tech, "rsi", None),
+        "rsi_value": getattr(tech, "rsi_value", None),
+        "rsi_signal": getattr(tech, "rsi_signal", ""),
         "volatility": getattr(tech, "volatility", None),
         "max_drawdown": getattr(tech, "max_drawdown", None),
         "warnings": list(getattr(tech, "warnings", []) or []),
@@ -99,6 +100,8 @@ def _sentiment_to_dict(s) -> Dict[str, Any]:
         "summary": getattr(s, "summary", ""),
         "positive": getattr(s, "positive", 0),
         "negative": getattr(s, "negative", 0),
+        "bullish_count": getattr(s, "bullish_count", 0),
+        "bearish_count": getattr(s, "bearish_count", 0),
         "details": getattr(s, "details", {}) or {},
     }
 
@@ -108,7 +111,9 @@ def _policy_to_dict(p) -> Dict[str, Any]:
         return {}
     return {
         "score": getattr(p, "score", 0),
+        "direction": getattr(p, "direction", "中性"),
         "summary": getattr(p, "summary", ""),
+        "hits": list(getattr(p, "hits", []) or []),
         "details": getattr(p, "details", {}) or {},
     }
 
