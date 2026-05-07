@@ -24,6 +24,7 @@ import pandas as pd
 from fund_advisor.utils.config import Config, load_config
 from fund_advisor.utils.logger import get_logger
 from fund_advisor.utils import estimate_bias
+from fund_advisor.data import db
 from fund_advisor.server.state import StateStore, get_store
 from fund_advisor.cli import (
     _collect_market,
@@ -364,6 +365,13 @@ class Scheduler:
             "data_health": health,
         })
 
+        # SQLite 持久化 (异常不影响桶)
+        try:
+            db.upsert_index_history(index_histories or {})
+            db.upsert_north_history(north_history)
+        except Exception as e:  # noqa: BLE001
+            log.debug(f"db 大盘落盘失败: {e}")
+
     # -------------------------------------------------------- sector
 
     def _tick_sector(self) -> None:
@@ -409,9 +417,17 @@ class Scheduler:
             # 关键词全灭火时退回原始列表, 避免前端完全空白
             filtered = raw
 
+        policy_items = list(policy_news_recent or [])
+
+        try:
+            db.upsert_news(filtered, "finance")
+            db.upsert_news(policy_items, "policy")
+        except Exception as e:  # noqa: BLE001
+            log.debug(f"db 新闻落盘失败: {e}")
+
         self.store.update({
             "news": filtered[:80],
-            "policy_news": (policy_news_recent or [])[:30],
+            "policy_news": policy_items[:30],
             "sentiment": _sentiment_to_dict(sentiment),
             "policy": _policy_to_dict(policy),
             "data_health": health,
@@ -448,6 +464,18 @@ class Scheduler:
                 "valuations": valuations,
                 "data_health": health,
             })
+
+            try:
+                today = datetime.now().strftime("%Y-%m-%d")
+                db.upsert_valuations(today, valuations or {})
+                if margin_history is not None and not margin_history.empty:
+                    db.upsert_margin_history(margin_history)
+                if breadth:
+                    db.upsert_breadth_daily(today, breadth)
+                db.cleanup(365)
+                db.vacuum_if_due()
+            except Exception as e:  # noqa: BLE001
+                log.debug(f"db valuations 落盘失败: {e}")
         except Exception as e:  # noqa: BLE001
             health["valuations"] = "failed"
             self.store.update({"data_health": health}, broadcast=False)

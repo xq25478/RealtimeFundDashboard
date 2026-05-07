@@ -42,6 +42,11 @@ config/config.json
 # Generated reports / logs / caches
 reports/
 report_log/
+report_log.legacy.txt
 data/cache/
+data/fund.db
+data/fund.db-journal
+data/fund.db-wal
+data/fund.db-shm
 .cache/
 *.log
