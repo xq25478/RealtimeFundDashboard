@@ -125,7 +125,7 @@
     const rows = [
       tech.trend ? `<div class="row"><span>技术面</span><span>${escapeHtml(tech.trend)}</span></div>` : "",
       typeof tech.score === "number" ? `<div class="row"><span>大盘评分</span><span>${tech.score.toFixed(0)}</span></div>` : "",
-      typeof north === "number" ? `<div class="row"><span>北向资金</span><span class="${cls(north)}">${(north / 1e8).toFixed(1)} 亿</span></div>` : "",
+      typeof north === "number" ? `<div class="row"><span>北向资金</span><span class="${cls(north)}">${north.toFixed(1)} 亿</span></div>` : "",
       typeof breadth.up_ratio === "number" ? `<div class="row"><span>上涨比例</span><span>${(breadth.up_ratio * 100).toFixed(0)}%</span></div>` : "",
       typeof breadth.limit_up === "number" ? `<div class="row"><span>涨停</span><span class="up">${breadth.limit_up}</span></div>` : "",
       typeof breadth.limit_down === "number" ? `<div class="row"><span>跌停</span><span class="down">${breadth.limit_down}</span></div>` : "",
@@ -234,8 +234,8 @@
       const delta = (latest.balance ?? 0) - (first.balance ?? 0);
       const days = margin.length;
       sum.innerHTML = `
-        <div class="item"><span class="label">最新</span>${fmtNum((latest.balance || 0) / 1e12, 2)} 万亿</div>
-        <div class="item"><span class="label">${days}日变化</span><span class="${cls(delta)}">${(delta / 1e8).toFixed(0)} 亿</span></div>
+        <div class="item"><span class="label">最新</span>${fmtNum((latest.balance || 0) / 10000, 2)} 万亿</div>
+        <div class="item"><span class="label">${days}日变化</span><span class="${cls(delta)}">${delta.toFixed(0)} 亿</span></div>
       `;
     } else {
       sum.innerHTML = `<div class="muted">两融数据加载中…</div>`;
@@ -253,8 +253,8 @@
       const cumul = hist.reduce((a, r) => a + (r.net || 0), 0);
       const positive = hist.filter(r => (r.net || 0) > 0).length;
       sum.innerHTML = `
-        <div class="item"><span class="label">今日</span><span class="${cls(total)}">${typeof total === "number" ? (total / 1e8).toFixed(1) + " 亿" : "-"}</span></div>
-        <div class="item"><span class="label">累计</span><span class="${cls(cumul)}">${(cumul / 1e8).toFixed(0)} 亿</span></div>
+        <div class="item"><span class="label">今日</span><span class="${cls(total)}">${typeof total === "number" ? total.toFixed(1) + " 亿" : "-"}</span></div>
+        <div class="item"><span class="label">累计</span><span class="${cls(cumul)}">${cumul.toFixed(0)} 亿</span></div>
         <div class="item"><span class="label">净流入天数</span>${positive} / ${hist.length}</div>
       `;
     } else {

@@ -1,7 +1,8 @@
 """大盘数据获取（基于 akshare）"""
 
+import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import pandas as pd
 
@@ -30,6 +31,21 @@ def _safe_import_akshare():
         raise ImportError(
             "未安装 akshare，请先运行: pip install akshare"
         ) from e
+
+
+def _with_retry(fn: Callable, attempts: int = 3, backoff: float = 0.8, label: str = ""):
+    """akshare 东方财富端 RemoteDisconnected 偶发断连, 给核心接口加重试"""
+    last_err: Optional[BaseException] = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if i < attempts - 1:
+                time.sleep(backoff * (i + 1))
+    if label:
+        log.warning(f"{label} 重试 {attempts} 次仍失败: {last_err}")
+    raise last_err  # type: ignore[misc]
 
 
 def get_index_realtime(symbols: Optional[List[str]] = None) -> pd.DataFrame:
@@ -98,16 +114,42 @@ def get_index_data(
     end = end or datetime.now().strftime("%Y%m%d")
     start = start or (datetime.now() - timedelta(days=180)).strftime("%Y%m%d")
 
+    df: Optional[pd.DataFrame] = None
     try:
-        df = ak.index_zh_a_hist(
-            symbol=symbol[2:] if symbol.startswith(("sh", "sz")) else symbol,
-            period=period,
-            start_date=start,
-            end_date=end,
+        df = _with_retry(
+            lambda: ak.index_zh_a_hist(
+                symbol=symbol[2:] if symbol.startswith(("sh", "sz")) else symbol,
+                period=period,
+                start_date=start,
+                end_date=end,
+            ),
+            attempts=3,
+            backoff=0.8,
+            label=f"指数 {symbol} 历史(东财)",
         )
     except Exception as e:
-        log.warning(f"获取指数 {symbol} 历史数据失败: {e}")
-        return pd.DataFrame()
+        log.warning(f"东财指数 {symbol} 历史失败, 回落到新浪: {e}")
+
+    # 回落: 新浪接口 (无涨跌幅字段, 用收盘价算)
+    if df is None or df.empty:
+        try:
+            df = _with_retry(
+                lambda: ak.stock_zh_index_daily(symbol=symbol),
+                attempts=2,
+                backoff=0.5,
+                label=f"指数 {symbol} 历史(新浪)",
+            )
+            if df is not None and not df.empty:
+                df = df.copy()
+                if "close" in df.columns:
+                    df["change_pct"] = df["close"].pct_change() * 100
+                # 裁剪到请求窗口
+                if "date" in df.columns:
+                    df["date"] = pd.to_datetime(df["date"])
+                    df = df[df["date"] >= pd.to_datetime(start)]
+        except Exception as e:
+            log.warning(f"新浪指数 {symbol} 历史也失败: {e}")
+            return pd.DataFrame()
 
     if df is None or df.empty:
         return pd.DataFrame()
@@ -272,7 +314,7 @@ def get_margin_balance(days: int = 20) -> pd.DataFrame:
 
 
 def get_market_breadth() -> Dict:
-    """市场宽度：涨停 / 跌停 / 强势股 / 连板数
+    """市场宽度：涨停 / 跌停 / 强势股 / 连板数 / 全市涨跌分布
 
     返回:
         zt_count       涨停家数
@@ -280,6 +322,13 @@ def get_market_breadth() -> Dict:
         strong_count   强势股数（含强势 + 涨停）
         max_consecutive 最高连板数
         consecutive_top  连板代表股 [(name, board_count), ...]
+        limit_up       = zt_count 别名
+        limit_down     = dt_count 别名
+        up_ratio       上涨家数占比 (0~1)
+        median_change  全市中位涨跌幅 (%)
+        total_count    全市家数
+        up_count       上涨家数
+        down_count     下跌家数
     """
     ak = _safe_import_akshare()
     today = datetime.now().strftime("%Y%m%d")
@@ -289,12 +338,20 @@ def get_market_breadth() -> Dict:
         "strong_count": None,
         "max_consecutive": None,
         "consecutive_top": [],
+        "limit_up": None,
+        "limit_down": None,
+        "up_ratio": None,
+        "median_change": None,
+        "total_count": None,
+        "up_count": None,
+        "down_count": None,
     }
 
     try:
-        df = ak.stock_zt_pool_em(date=today)
+        df = _with_retry(lambda: ak.stock_zt_pool_em(date=today), attempts=2, backoff=0.5, label="涨停池")
         if df is not None and not df.empty:
             out["zt_count"] = int(len(df))
+            out["limit_up"] = out["zt_count"]
             if "连板数" in df.columns:
                 board = pd.to_numeric(df["连板数"], errors="coerce").dropna()
                 if not board.empty:
@@ -308,18 +365,36 @@ def get_market_breadth() -> Dict:
         log.debug(f"涨停池获取失败: {e}")
 
     try:
-        df = ak.stock_zt_pool_dtgc_em(date=today)
+        df = _with_retry(lambda: ak.stock_zt_pool_dtgc_em(date=today), attempts=2, backoff=0.5, label="跌停池")
         if df is not None and not df.empty:
             out["dt_count"] = int(len(df))
+            out["limit_down"] = out["dt_count"]
     except Exception as e:
         log.debug(f"跌停池获取失败: {e}")
 
     try:
-        df = ak.stock_zt_pool_strong_em(date=today)
+        df = _with_retry(lambda: ak.stock_zt_pool_strong_em(date=today), attempts=2, backoff=0.5, label="强势股池")
         if df is not None and not df.empty:
             out["strong_count"] = int(len(df))
     except Exception as e:
         log.debug(f"强势股池获取失败: {e}")
+
+    # 全市涨跌分布 (up_ratio / median_change) 从 A 股实时盘口推
+    try:
+        df = _with_retry(lambda: ak.stock_zh_a_spot_em(), attempts=2, backoff=0.5, label="A股实时")
+        if df is not None and not df.empty and "涨跌幅" in df.columns:
+            chg = pd.to_numeric(df["涨跌幅"], errors="coerce").dropna()
+            if not chg.empty:
+                total = int(len(chg))
+                up = int((chg > 0).sum())
+                down = int((chg < 0).sum())
+                out["total_count"] = total
+                out["up_count"] = up
+                out["down_count"] = down
+                out["up_ratio"] = round(up / total, 4) if total else None
+                out["median_change"] = round(float(chg.median()), 3)
+    except Exception as e:
+        log.debug(f"A 股涨跌分布获取失败: {e}")
 
     return out
 
@@ -389,7 +464,12 @@ def get_sector_flow(top_n: int = 10) -> pd.DataFrame:
     """获取行业板块资金流向 TOP N"""
     ak = _safe_import_akshare()
     try:
-        df = ak.stock_sector_fund_flow_rank(indicator="今日", sector_type="行业资金流")
+        df = _with_retry(
+            lambda: ak.stock_sector_fund_flow_rank(indicator="今日", sector_type="行业资金流"),
+            attempts=3,
+            backoff=0.8,
+            label="板块资金流向",
+        )
     except Exception as e:
         log.warning(f"获取板块资金流向失败: {e}")
         return pd.DataFrame()
