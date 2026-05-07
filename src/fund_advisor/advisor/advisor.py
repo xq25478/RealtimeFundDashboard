@@ -1,5 +1,6 @@
 """LLM 投资顾问主入口：调用 Claude 生成基金操作指南"""
 
+import time
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -128,26 +129,65 @@ def generate_advice(
 
 
 def _stream_and_collect(client, request_params) -> str:
-    """流式拉取，最终返回完整文本（避免长输出超时）"""
-    chunks: List[str] = []
-    try:
-        with client.messages.stream(**request_params) as s:
-            for text in s.text_stream:
-                chunks.append(text)
-    except TypeError:
-        # 部分代理网关不支持 cache_control / 高级参数, 兜底为简化请求
-        params = dict(request_params)
-        if isinstance(params.get("system"), list):
-            params["system"] = "\n".join(
-                b.get("text", "") for b in params["system"] if isinstance(b, dict)
-            )
-        params.pop("thinking", None)
-        params.pop("output_config", None)
-        chunks = []
-        with client.messages.stream(**params) as s:
-            for text in s.text_stream:
-                chunks.append(text)
-    return "".join(chunks)
+    """流式拉取，最终返回完整文本（避免长输出超时）
+
+    兼容上游网关偶发 `peer closed connection` / `incomplete chunked read`,
+    最多重试 2 次; 若全部失败但已有片段, 返回已收到的部分并追加断流提示。
+    """
+    max_attempts = 3
+    last_err: Optional[BaseException] = None
+    collected: List[str] = []
+
+    for attempt in range(max_attempts):
+        chunks: List[str] = []
+        try:
+            with client.messages.stream(**request_params) as s:
+                for text in s.text_stream:
+                    chunks.append(text)
+            return "".join(chunks)
+        except TypeError:
+            # 部分代理网关不支持 cache_control / 高级参数, 兜底为简化请求
+            params = dict(request_params)
+            if isinstance(params.get("system"), list):
+                params["system"] = "\n".join(
+                    b.get("text", "") for b in params["system"] if isinstance(b, dict)
+                )
+            params.pop("thinking", None)
+            params.pop("output_config", None)
+            try:
+                chunks = []
+                with client.messages.stream(**params) as s:
+                    for text in s.text_stream:
+                        chunks.append(text)
+                return "".join(chunks)
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if len(chunks) > len(collected):
+                    collected = chunks
+                request_params = params  # 后续重试沿用简化版
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if len(chunks) > len(collected):
+                collected = chunks
+            msg = str(e).lower()
+            transient = any(tag in msg for tag in (
+                "peer closed", "incomplete chunked", "connection reset",
+                "remoteprotocolerror", "protocol", "timeout", "eof",
+            ))
+            if not transient:
+                break
+            if attempt < max_attempts - 1:
+                log.warning(f"投资指南流中断 (第 {attempt + 1} 次), 准备重试: {e}")
+                time.sleep(1.5 * (attempt + 1))
+
+    if collected:
+        log.warning(f"投资指南流式 {max_attempts} 次均中断, 返回已收到片段 ({len(''.join(collected))} 字符)")
+        return "".join(collected) + (
+            "\n\n---\n\n⚠️ **流式中断**: 上游连接被对端提前关闭, "
+            "以上为已生成的部分内容。建议稍后再点【生成完整投资指南】重试。"
+            f"(原始错误: {last_err})"
+        )
+    raise last_err if last_err else RuntimeError("stream failed without error")
 
 
 def _extract_text(content) -> str:
