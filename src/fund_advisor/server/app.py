@@ -42,6 +42,8 @@ def create_app(config_path: str = "config/holdings.yaml") -> Flask:
     )
 
     app.config["CONFIG_PATH"] = config_path
+    app.jinja_env.auto_reload = True
+    app.config["TEMPLATES_AUTO_RELOAD"] = True
     start_scheduler(config_path)
 
     # ---------------------------------------------------------------- routes
